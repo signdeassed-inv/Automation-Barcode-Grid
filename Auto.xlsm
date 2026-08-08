@@ -1,0 +1,263 @@
+Option Explicit
+
+'=========================================================
+' BARCODE SVG IMPORTER - A4 AUTO FIT VERSION
+' Includes: Smart SVG Text Extraction & Native Rendering
+'=========================================================
+
+Public Sub Import_Barcodes_A4_Auto()
+    
+    Dim folderPath As String
+    Dim files() As String
+    Dim fileCount As Long
+    Dim i As Long
+    Dim pageNumber As Long
+    Dim positionOnPage As Long
+    
+    Dim ws As Worksheet
+    Dim rowNumber As Long
+    Dim colNumber As Long
+    Dim svgPath As String
+    
+    '=====================================================
+    ' A4 SETTINGS (Measured in Points)
+    '=====================================================
+    Const COLUMNS As Long = 5
+    Const ROWS As Long = 21
+    
+    Const PAGE_WIDTH As Double = 595.27
+    Const PAGE_HEIGHT As Double = 841.89
+    
+    Const MARGIN_X As Double = 25
+    Const MARGIN_Y As Double = 25
+    
+    Const GAP_X As Double = 10
+    Const GAP_Y As Double = 10
+    
+    Dim CELL_WIDTH As Double
+    Dim CELL_HEIGHT As Double
+    Dim BARCODE_WIDTH As Double
+    Dim BARCODE_HEIGHT As Double
+    
+    ' Calculate cell dimensions dynamically
+    CELL_WIDTH = (PAGE_WIDTH - (MARGIN_X * 2) - (GAP_X * (COLUMNS - 1))) / COLUMNS
+    CELL_HEIGHT = (PAGE_HEIGHT - (MARGIN_Y * 2) - (GAP_Y * (ROWS - 1))) / ROWS
+    
+    BARCODE_WIDTH = CELL_WIDTH - 4
+    BARCODE_HEIGHT = CELL_HEIGHT - 4
+    
+    '=====================================================
+    ' 1. PICK FOLDER & GET FILES
+    '=====================================================
+    folderPath = SelectFolder()
+    If folderPath = "" Then Exit Sub
+    
+    fileCount = GetBarcodeFiles(folderPath, files)
+    If fileCount = 0 Then
+        MsgBox "No SVG files found.", vbExclamation
+        Exit Sub
+    End If
+    
+    SortBarcodeFiles files, fileCount
+    DeleteGeneratedSheets
+    
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    '=====================================================
+    ' 2. IMPORT AND ARRANGE
+    '=====================================================
+    pageNumber = 1
+    Set ws = CreateBarcodeSheet(pageNumber)
+    
+    For i = 1 To fileCount
+        positionOnPage = ((i - 1) Mod (COLUMNS * ROWS)) + 1
+        
+        If positionOnPage = 1 And i > 1 Then
+            pageNumber = pageNumber + 1
+            Set ws = CreateBarcodeSheet(pageNumber)
+        End If
+        
+        rowNumber = Int((positionOnPage - 1) / COLUMNS)
+        colNumber = (positionOnPage - 1) Mod COLUMNS
+        
+        svgPath = folderPath & "\" & files(i)
+        
+        Dim posX As Double, posY As Double
+        posX = MARGIN_X + (colNumber * (CELL_WIDTH + GAP_X))
+        posY = MARGIN_Y + (rowNumber * (CELL_HEIGHT + GAP_Y))
+        
+        ' Call the SMART SVG inserter
+        InsertSVG_WithNativeText ws, svgPath, posX, posY, BARCODE_WIDTH, BARCODE_HEIGHT
+        
+    Next i
+    
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    
+    MsgBox "Barcodes imported with native text fixing!" & vbCrLf & _
+           "Total SVGs: " & fileCount & vbCrLf & _
+           "Pages: " & pageNumber, vbInformation, "Done"
+
+End Sub
+
+'=========================================================
+' THE "SMART" SVG INSERTER (FIXES BROKEN EXCEL TEXT)
+'=========================================================
+Private Sub InsertSVG_WithNativeText(ws As Worksheet, imgPath As String, x As Double, y As Double, w As Double, h As Double)
+    Dim fso As Object, ts As Object
+    Dim svgContent As String, extractedText As String, tempPath As String
+    
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    ' 1. Read Original SVG
+    Set ts = fso.OpenTextFile(imgPath, 1, False, 0)
+    svgContent = ts.ReadAll
+    ts.Close
+    
+    ' 2. Extract and Remove buggy <text> tags using Regex
+    Dim regEx As Object, matches As Object
+    Set regEx = CreateObject("VBScript.RegExp")
+    regEx.Global = True
+    regEx.IgnoreCase = True
+    regEx.Pattern = "<text[^>]*>([\s\S]*?)<\/text>"
+    
+    Set matches = regEx.Execute(svgContent)
+    If matches.Count > 0 Then
+        extractedText = matches(0).SubMatches(0)
+        ' Strip nested tags like <tspan> if present
+        Dim regExTags As Object
+        Set regExTags = CreateObject("VBScript.RegExp")
+        regExTags.Global = True
+        regExTags.Pattern = "<[^>]+>"
+        extractedText = Trim(regExTags.Replace(extractedText, ""))
+    End If
+    
+    ' Erase the text from the SVG so Excel doesn't render it poorly
+    svgContent = regEx.Replace(svgContent, "")
+    
+    ' 3. Save Cleaned SVG to Temp File
+    tempPath = Environ("TEMP") & "\temp_barcode_" & Format(Now, "hhmmss") & ".svg"
+    Set ts = fso.CreateTextFile(tempPath, True, False)
+    ts.Write svgContent
+    ts.Close
+    
+    ' 4. Calculate heights (Reserve space for the text if it exists)
+    Dim picHeight As Double, textHeight As Double
+    If extractedText <> "" Then
+        textHeight = 12 ' Font size spacing
+        picHeight = h - textHeight
+    Else
+        textHeight = 0
+        picHeight = h
+    End If
+    
+    ' 5. Insert pure barcode picture
+    On Error Resume Next
+    With ws.Shapes.AddPicture(Filename:=tempPath, LinkToFile:=msoFalse, SaveWithDocument:=msoTrue, _
+                              Left:=x + 2, Top:=y + 2, Width:=w, Height:=picHeight)
+        .LockAspectRatio = msoFalse ' Allows 1D barcodes to stretch vertically without distortion
+    End With
+    
+    ' 6. Insert perfectly crisp Native Excel Textbox
+    If extractedText <> "" Then
+        Dim txtBox As Shape
+        Set txtBox = ws.Shapes.AddTextbox(msoTextOrientationHorizontal, x + 2, y + 2 + picHeight, w, textHeight)
+        With txtBox
+            .TextFrame.Characters.Text = extractedText
+            .TextFrame.Characters.Font.Name = "Arial"
+            .TextFrame.Characters.Font.Size = 8
+            .TextFrame.Characters.Font.Bold = True
+            .TextFrame.HorizontalAlignment = xlHAlignCenter
+            .TextFrame.VerticalAlignment = xlVAlignCenter
+            ' Remove inner margins so text fits perfectly
+            .TextFrame2.MarginLeft = 0
+            .TextFrame2.MarginRight = 0
+            .TextFrame2.MarginTop = 0
+            .TextFrame2.MarginBottom = 0
+            .Line.Visible = msoFalse
+            .Fill.Visible = msoFalse
+        End With
+    End If
+    On Error GoTo 0
+    
+    ' 7. Cleanup Temp File
+    If fso.FileExists(tempPath) Then fso.DeleteFile tempPath
+End Sub
+
+'=========================================================
+' STANDARD HELPER FUNCTIONS
+'=========================================================
+
+Private Function SelectFolder() As String
+    Dim fd As FileDialog
+    Set fd = Application.FileDialog(msoFileDialogFolderPicker)
+    fd.Title = "Select Folder Containing Barcode SVGs"
+    If fd.Show = -1 Then SelectFolder = fd.SelectedItems(1) Else SelectFolder = ""
+End Function
+
+Private Function GetBarcodeFiles(folderPath As String, ByRef files() As String) As Long
+    Dim fileName As String, count As Long
+    count = 0
+    fileName = Dir(folderPath & "\*.svg")
+    Do While fileName <> ""
+        count = count + 1
+        ReDim Preserve files(1 To count)
+        files(count) = fileName
+        fileName = Dir()
+    Loop
+    GetBarcodeFiles = count
+End Function
+
+Private Function ExtractBarcodeNumber(fileName As String) As String
+    Dim regEx As Object
+    Set regEx = CreateObject("VBScript.RegExp")
+    regEx.Pattern = "\d+(?=\.svg)"
+    If regEx.Test(fileName) Then ExtractBarcodeNumber = regEx.Execute(fileName)(0).Value Else ExtractBarcodeNumber = "0"
+End Function
+
+Private Sub SortBarcodeFiles(ByRef files() As String, count As Long)
+    Dim i As Long, j As Long, temp As String
+    Dim num1 As Long, num2 As Long
+    For i = 1 To count - 1
+        For j = i + 1 To count
+            num1 = CLng(ExtractBarcodeNumber(files(i)))
+            num2 = CLng(ExtractBarcodeNumber(files(j)))
+            If num1 > num2 Then
+                temp = files(i): files(i) = files(j): files(j) = temp
+            End If
+        Next j
+    Next i
+End Sub
+
+Private Sub DeleteGeneratedSheets()
+    Dim ws As Worksheet
+    Application.DisplayAlerts = False
+    For Each ws In ThisWorkbook.Worksheets
+        If ws.Name Like "Barcodes_Page_*" Then ws.Delete
+    Next ws
+    Application.DisplayAlerts = True
+End Sub
+
+Private Function CreateBarcodeSheet(pageNum As Long) As Worksheet
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+    ws.Name = "Barcodes_Page_" & pageNum
+    Application.PrintCommunication = False
+    With ws.PageSetup
+        .PaperSize = xlPaperA4
+        .Orientation = xlPortrait
+        .LeftMargin = Application.InchesToPoints(0.2)
+        .RightMargin = Application.InchesToPoints(0.2)
+        .TopMargin = Application.InchesToPoints(0.2)
+        .BottomMargin = Application.InchesToPoints(0.2)
+        .HeaderMargin = 0
+        .FooterMargin = 0
+        .Zoom = False
+        .FitToPagesWide = 1
+        .FitToPagesTall = 1
+    End With
+    Application.PrintCommunication = True
+    ActiveWindow.DisplayGridlines = False
+    Set CreateBarcodeSheet = ws
+End Function
